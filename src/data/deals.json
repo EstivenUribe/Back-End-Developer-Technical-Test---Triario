@@ -1,19 +1,19 @@
 [
   {
     "externalId": "SRC-DEAL-0001",
-    "dealname": "Website redesign - Example Co",
+    "dealname": "Triario Test - Website redesign - Example Co",
     "amount": 4500,
     "contactEmail": "laura.gomez@example.com"
   },
   {
     "externalId": "SRC-DEAL-0002",
-    "dealname": "CRM onboarding - Example Co",
+    "dealname": "Triario Test - CRM onboarding - Example Co",
     "amount": 1200.5,
     "contactEmail": "carlos.ruiz@example.com"
   },
   {
     "externalId": "SRC-DEAL-0003",
-    "dealname": "Annual support - Sample Ltd",
+    "dealname": "Triario Test - Annual support - Sample Ltd",
     "amount": 9800,
     "contactEmail": "ana.torres@example.org"
   }

@@ -15,3 +15,9 @@ Thumbs.db
 # Editor folders
 .vscode/
 .idea/
+
+# Interview preparation notes (local only, never part of the submission)
+expo.txt
+
+# Delivery folder / ZIP built by the release step
+release/
