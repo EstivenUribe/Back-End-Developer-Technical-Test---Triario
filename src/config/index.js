@@ -24,6 +24,7 @@ const DEFAULTS = Object.freeze({
   timeoutMs: 10000,
   maxRetries: 3,
   retryBaseDelayMs: 1000,
+  maxRetryWaitMs: 120000, // longest single wait a script accepts from Retry-After before giving up
   logLevel: 'info',
 });
 
@@ -123,6 +124,7 @@ function loadConfig({ env = process.env, requireToken = true } = {}) {
       timeoutMs: readInteger(env, 'HUBSPOT_TIMEOUT_MS', DEFAULTS.timeoutMs),
       maxRetries: readInteger(env, 'HUBSPOT_MAX_RETRIES', DEFAULTS.maxRetries),
       retryBaseDelayMs: readInteger(env, 'HUBSPOT_RETRY_BASE_DELAY_MS', DEFAULTS.retryBaseDelayMs),
+      maxRetryWaitMs: readInteger(env, 'HUBSPOT_MAX_RETRY_WAIT_MS', DEFAULTS.maxRetryWaitMs),
       portalId,
       // No defaults on purpose: real ids come from the portal (node src/examples/diagnose.js).
       pipelineId: readString(env, 'HUBSPOT_PIPELINE_ID', ''),

@@ -120,6 +120,22 @@ describe('validateHubSpotPayload - deals', () => {
   test('rejects an empty dealname', () => {
     assert.throws(() => validateHubSpotPayload('deals', { dealname: '   ', pipeline: 'p', dealstage: 's' }), /dealname/);
   });
+
+  test('normalizes closedate to canonical ISO 8601 and accepts epoch milliseconds', () => {
+    const base = { dealname: 'x', pipeline: 'p', dealstage: 's' };
+    assert.equal(validateHubSpotPayload('deals', { ...base, closedate: '2026-12-31T00:00:00Z' }).closedate, '2026-12-31T00:00:00.000Z');
+    assert.equal(validateHubSpotPayload('deals', { ...base, closedate: '2026-12-31' }).closedate, '2026-12-31T00:00:00.000Z');
+    assert.equal(validateHubSpotPayload('deals', { ...base, closedate: Date.UTC(2026, 11, 31) }).closedate, '2026-12-31T00:00:00.000Z');
+    assert.equal(validateHubSpotPayload('deals', { ...base, closedate: String(Date.UTC(2026, 11, 31)) }).closedate, '2026-12-31T00:00:00.000Z');
+  });
+
+  test('closedate: empty string clears the property, invalid values are rejected', () => {
+    const base = { dealname: 'x', pipeline: 'p', dealstage: 's' };
+    assert.equal(validateHubSpotPayload('deals', { ...base, closedate: '' }).closedate, '');
+    assert.equal(validateHubSpotPayload('deals', { ...base, closedate: null }).closedate, null);
+    assert.throws(() => validateHubSpotPayload('deals', { ...base, closedate: 'next quarter' }), /closedate: must be an ISO 8601/);
+    assert.throws(() => validateHubSpotPayload('deals', { closedate: 'soon' }, { partial: true }), /closedate/);
+  });
 });
 
 describe('validateHubSpotPayload - generic', () => {

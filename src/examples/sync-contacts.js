@@ -11,7 +11,7 @@
 
 const path = require('path');
 const { syncContactsWithHubSpot } = require('../services/syncService');
-const { loadJsonArray } = require('../utils/syncHelpers');
+const { loadJsonArray, hasSyncFailures } = require('../utils/syncHelpers');
 const { runExample, parseCliArgs, line } = require('./hubSpotApiHandler');
 const { printSyncSummary } = require('./syncOutput');
 
@@ -24,7 +24,7 @@ runExample(
     line('info', `source: ${path.resolve(values.file)} (${records.length} record(s))`);
     const summary = await syncContactsWithHubSpot(records);
     const counts = printSyncSummary(summary);
-    if (counts.failed > 0 || counts.aborted) process.exitCode = 1;
+    if (hasSyncFailures(counts)) process.exitCode = 1;
     return undefined;
   },
   { printResult: false }

@@ -76,6 +76,7 @@ class HubSpotError extends Error {
     this.networkCode = networkCode;
     this.attempts = null; // set by withRetry: HTTP attempts made before giving up
     this.outcomeUncertain = false; // set by withRetry for non-idempotent requests
+    this.retryWaitExceeded = false; // set by withRetry when Retry-After exceeds the operational maximum
     this.logged = false; // set by handleHubSpotErrors so the error is logged once
   }
 
@@ -95,6 +96,7 @@ class HubSpotError extends Error {
       networkCode: this.networkCode,
       attempts: this.attempts,
       outcomeUncertain: this.outcomeUncertain,
+      retryWaitExceeded: this.retryWaitExceeded,
     };
   }
 }
@@ -233,10 +235,14 @@ function shouldRetry(error, { idempotent = true } = {}) {
 /**
  * Exponential backoff with jitter.
  *
+ * A server-provided `Retry-After` is honoured in full: `maxDelayMs` bounds only the
+ * locally computed formula and never shortens the wait the server asked for
+ * (retrying earlier than instructed would just produce another 429).
+ *
  * @param {number} attempt          1-based retry attempt number.
  * @param {object} [options]
  * @param {number} [options.baseDelayMs=1000]
- * @param {number} [options.maxDelayMs=30000]
+ * @param {number} [options.maxDelayMs=30000]  cap for the local formula only
  * @param {number} [options.minDelayMs=0]      e.g. 2000 for 5xx per HubSpot guidance.
  * @param {number|null} [options.retryAfterMs] Server-provided wait; wins over the formula.
  * @param {() => number} [options.random]      Injectable for deterministic tests.
@@ -246,7 +252,7 @@ function computeBackoffDelay(
   { baseDelayMs = 1000, maxDelayMs = DEFAULT_MAX_DELAY_MS, minDelayMs = 0, retryAfterMs = null, random = Math.random } = {}
 ) {
   if (retryAfterMs !== null && retryAfterMs !== undefined) {
-    return Math.min(Math.max(retryAfterMs, minDelayMs), maxDelayMs);
+    return Math.max(retryAfterMs, minDelayMs);
   }
   const exponential = baseDelayMs * 2 ** Math.max(0, attempt - 1);
   const jitter = random() * exponential * 0.2; // up to +20 % to spread concurrent retries
@@ -262,12 +268,23 @@ function computeBackoffDelay(
  * @param {number} [options.baseDelayMs=1000]
  * @param {number} [options.maxDelayMs=30000]
  * @param {boolean} [options.idempotent=true]
+ * @param {number|null} [options.maxWaitMs=null]  Operational maximum for a single wait. When the
+ *        server's Retry-After exceeds it, the request is NOT retried (never earlier than asked):
+ *        the error is thrown with `retryWaitExceeded: true` and the wait in `retryAfterMs`.
  * @param {(ms:number)=>Promise<void>} [options.sleep]  Injectable for tests.
  * @param {(error:HubSpotError, attempt:number, delayMs:number)=>void} [options.onRetry]
  */
 async function withRetry(
   fn,
-  { maxRetries = 3, baseDelayMs = 1000, maxDelayMs = DEFAULT_MAX_DELAY_MS, idempotent = true, sleep: wait = sleep, onRetry } = {}
+  {
+    maxRetries = 3,
+    baseDelayMs = 1000,
+    maxDelayMs = DEFAULT_MAX_DELAY_MS,
+    idempotent = true,
+    maxWaitMs = null,
+    sleep: wait = sleep,
+    onRetry,
+  } = {}
 ) {
   let attempts = 0;
   for (;;) {
@@ -298,6 +315,15 @@ async function withRetry(
         retryAfterMs: error.retryAfterMs,
         minDelayMs: error.code === ERROR_CODES.SERVER_ERROR ? MIN_SERVER_ERROR_DELAY_MS : 0,
       });
+
+      if (maxWaitMs !== null && maxWaitMs !== undefined && delayMs > maxWaitMs) {
+        // Waiting longer than the operational maximum is not useful for a script; stop and
+        // report instead of retrying earlier than the server asked.
+        error.attempts = attempts;
+        error.retryWaitExceeded = true;
+        error.message += ` HubSpot asked to wait ${delayMs} ms before retrying (Retry-After), above the operational maximum of ${maxWaitMs} ms (HUBSPOT_MAX_RETRY_WAIT_MS); not retried.`;
+        throw error;
+      }
 
       if (onRetry) onRetry(error, attempts, delayMs);
       await wait(delayMs);
@@ -335,6 +361,8 @@ function handleHubSpotErrors(error, context = {}) {
     request: normalized.method && normalized.url ? `${normalized.method} ${normalized.url}` : undefined,
     attempts: normalized.attempts,
     outcomeUncertain: normalized.outcomeUncertain || undefined,
+    retryWaitExceeded: normalized.retryWaitExceeded || undefined,
+    retryAfterMs: normalized.retryWaitExceeded ? normalized.retryAfterMs : undefined,
   });
   normalized.logged = true;
   return normalized;

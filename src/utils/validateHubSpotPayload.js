@@ -58,7 +58,7 @@ const SCHEMAS = Object.freeze({
       amount: { type: 'number', min: 0 },
       pipeline: { type: 'string', minLength: 1 },
       dealstage: { type: 'string', minLength: 1 },
-      closedate: { type: 'string' },
+      closedate: { type: 'date' }, // datetime property: ISO 8601 or epoch ms; '' clears it
       external_id: { type: 'string', minLength: 1, maxLength: 255 },
     },
   },
@@ -100,9 +100,31 @@ function validateField(name, rule, value, errors) {
       }
       return String(numeric);
     }
+    case 'date': {
+      // '' (or null, handled above) clears the property in HubSpot.
+      if (typeof value === 'string' && value.trim() === '') return '';
+      const ms = parseDateValue(value);
+      if (ms === null || Number.isNaN(ms)) {
+        errors.push({ field: name, message: 'must be an ISO 8601 date/datetime or epoch milliseconds' });
+        return value;
+      }
+      return new Date(ms).toISOString(); // canonical form, e.g. 2026-12-31T00:00:00.000Z
+    }
     default:
       return value;
   }
+}
+
+/**
+ * Parses a date-like value into epoch milliseconds.
+ * @returns {number|null|NaN} null for empty input, NaN for unparseable input
+ */
+function parseDateValue(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : NaN;
+  const text = String(value).trim();
+  if (text === '') return null;
+  return /^-?\d+$/.test(text) ? Number(text) : Date.parse(text);
 }
 
 /**
@@ -272,6 +294,7 @@ module.exports = {
   validateHubSpotId,
   validatePageSize,
   validateSearchFilters,
+  parseDateValue,
   PayloadValidationError,
   normalizeEmail,
   SCHEMAS,

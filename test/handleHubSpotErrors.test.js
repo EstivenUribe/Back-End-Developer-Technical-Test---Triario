@@ -180,6 +180,22 @@ describe('parseRetryAfter / computeBackoffDelay', () => {
     assert.equal(computeBackoffDelay(1, { baseDelayMs: 100, minDelayMs: MIN_SERVER_ERROR_DELAY_MS, random: () => 0 }), 2000);
     assert.equal(computeBackoffDelay(10, { baseDelayMs: 1000, maxDelayMs: 30000, random: () => 0 }), 30000);
   });
+
+  test('never shortens a Retry-After longer than maxDelayMs (regression)', () => {
+    // maxDelayMs bounds the local formula only; the server-provided wait is honoured in full.
+    assert.equal(computeBackoffDelay(1, { retryAfterMs: 120000, maxDelayMs: 30000, random: () => 0 }), 120000);
+    assert.equal(computeBackoffDelay(3, { retryAfterMs: 45000, maxDelayMs: 30000, minDelayMs: 2000 }), 45000);
+    // minDelayMs still applies to a very short Retry-After on 5xx
+    assert.equal(computeBackoffDelay(1, { retryAfterMs: 500, minDelayMs: MIN_SERVER_ERROR_DELAY_MS }), 2000);
+  });
+
+  test('parses Retry-After above 30 seconds in seconds and as an HTTP date', () => {
+    const seconds = normalizeHubSpotError(axiosLikeError({ status: 429, data: {}, headers: { 'retry-after': '120' } }));
+    assert.equal(seconds.retryAfterMs, 120000);
+    const httpDate = new Date(Date.now() + 90000).toUTCString();
+    const dated = normalizeHubSpotError(axiosLikeError({ status: 429, data: {}, headers: { 'Retry-After': httpDate } }));
+    assert.ok(dated.retryAfterMs > 85000 && dated.retryAfterMs <= 90000, `got ${dated.retryAfterMs}`);
+  });
 });
 
 describe('shouldRetry / isOutcomeUncertain', () => {
@@ -262,6 +278,65 @@ describe('withRetry', () => {
       { code: ERROR_CODES.VALIDATION_ERROR, attempts: 1 }
     );
     assert.equal(calls, 1);
+  });
+
+  test('waits the full Retry-After (120 s in seconds, ~90 s as HTTP date) when no operational maximum applies', async () => {
+    const delays = [];
+    let calls = 0;
+    const httpDate = new Date(Date.now() + 90000).toUTCString();
+    const result = await withRetry(
+      async () => {
+        calls += 1;
+        if (calls === 1) throw axiosLikeError({ status: 429, data: {}, headers: { 'retry-after': '120' } });
+        if (calls === 2) throw axiosLikeError({ status: 429, data: {}, headers: { 'retry-after': httpDate } });
+        return 'ok';
+      },
+      { maxRetries: 3, maxDelayMs: 30000, sleep: async (ms) => delays.push(ms) }
+    );
+    assert.equal(result, 'ok');
+    assert.equal(delays[0], 120000); // not capped at maxDelayMs
+    assert.ok(delays[1] > 85000 && delays[1] <= 90000, `got ${delays[1]}`);
+  });
+
+  test('stops instead of retrying early when Retry-After exceeds the operational maximum', async () => {
+    let calls = 0;
+    const delays = [];
+    await assert.rejects(
+      withRetry(
+        async () => {
+          calls += 1;
+          throw axiosLikeError({ status: 429, data: {}, headers: { 'retry-after': '120' } });
+        },
+        { maxRetries: 3, maxWaitMs: 60000, sleep: async (ms) => delays.push(ms) }
+      ),
+      (error) => {
+        assert.equal(error.code, ERROR_CODES.RATE_LIMIT);
+        assert.equal(error.retryWaitExceeded, true);
+        assert.equal(error.retryAfterMs, 120000);
+        assert.equal(error.attempts, 1);
+        assert.match(error.message, /120000 ms .* 60000 ms .*not retried/);
+        return true;
+      }
+    );
+    assert.equal(calls, 1);
+    assert.deepEqual(delays, []); // never slept a shorter time than the server asked
+  });
+
+  test('still retries a Retry-After within the operational maximum, keeping maxRetries and jitter', async () => {
+    let calls = 0;
+    const delays = [];
+    await assert.rejects(
+      withRetry(
+        async () => {
+          calls += 1;
+          throw axiosLikeError({ status: 429, data: {}, headers: { 'retry-after': '45' } });
+        },
+        { maxRetries: 2, maxWaitMs: 60000, maxDelayMs: 30000, sleep: async (ms) => delays.push(ms) }
+      ),
+      { code: ERROR_CODES.RATE_LIMIT, attempts: 3 }
+    );
+    assert.equal(calls, 3);
+    assert.deepEqual(delays, [45000, 45000]);
   });
 
   test('uses a minimum 2 second delay for 5xx', async () => {

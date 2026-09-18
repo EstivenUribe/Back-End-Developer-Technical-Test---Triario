@@ -57,6 +57,8 @@ describe('config.loadConfig', () => {
     assert.equal(config.hubspot.baseUrl, 'https://api.hubapi.com');
     assert.equal(config.hubspot.timeoutMs, 2500);
     assert.equal(config.hubspot.maxRetries, 0);
+    assert.equal(config.hubspot.maxRetryWaitMs, DEFAULTS.maxRetryWaitMs);
+    assert.equal(loadConfig({ env: { HUBSPOT_ACCESS_TOKEN: 'x', HUBSPOT_MAX_RETRY_WAIT_MS: '5000' } }).hubspot.maxRetryWaitMs, 5000);
     assert.equal(config.hubspot.pipelineId, 'pipe');
     assert.equal(config.logLevel, 'debug');
     assert.ok(Object.isFrozen(config.hubspot));

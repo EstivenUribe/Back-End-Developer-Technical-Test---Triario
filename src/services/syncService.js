@@ -36,10 +36,10 @@ const {
   partitionByKey,
   computeChangedProperties,
   createSummary,
+  applyDealResult,
+  isAbortError,
 } = require('../utils/syncHelpers');
 const logger = require('../utils/logger');
-
-const ABORT_CODES = new Set([ERROR_CODES.AUTHENTICATION_ERROR, ERROR_CODES.AUTHORIZATION_ERROR]);
 
 const DEAL_EXTERNAL_ID_PROPERTY = Object.freeze({
   name: 'external_id',
@@ -106,7 +106,7 @@ async function syncContactsWithHubSpot(contacts) {
       summary[outcome.status].push({ index, key, id: outcome.id, ...(outcome.changedProperties ? { changedProperties: outcome.changedProperties } : {}) });
     } catch (error) {
       summary.failed.push({ index, key, ...failureOf(error) });
-      if (ABORT_CODES.has(error.code)) {
+      if (isAbortError(error)) {
         summary.aborted = error.code;
         logger.warn(`syncContactsWithHubSpot aborted after record ${index}: ${error.code}`);
         break;
@@ -210,14 +210,27 @@ function prepareDeal(record, target) {
  * Syncs deals into HubSpot, keyed by `external_id`. Idempotent: running the same source
  * twice creates nothing. Pipeline and stage are applied on create only (from
  * HUBSPOT_PIPELINE_ID / HUBSPOT_STAGE_ID or `options`); updates compare dealname,
- * amount and closedate. `contactEmail`, when present, is resolved to a contact and
- * associated with the deal (idempotently).
+ * amount and closedate (closedate by instant, not by text). `contactEmail`, when
+ * present, is resolved to a contact and associated with the deal (idempotently).
+ *
+ * Association outcomes per deal entry (`entry.association.status`):
+ * - `created` / `already`: association in place.
+ * - `skipped` (CONTACT_NOT_FOUND): the contact does not exist in HubSpot. This is a
+ *   source-data condition, not an integration failure: the deal keeps its own status
+ *   (created/updated/unchanged) and the association is completed by a later run once
+ *   the contact exists (sync contacts first).
+ * - `failed`: the deal was saved but HubSpot rejected the association (or the contact
+ *   lookup failed). The entry is reported under `partial` with its deal id and
+ *   `dealStatus`, never as a failed deal and never twice. A later run re-attempts the
+ *   association without touching the deal (lookup by external_id → unchanged → associate).
+ * - 401/403 while associating abort the run like any other auth/scope error; the deal
+ *   that was already saved is still reported (as partial).
  *
  * @param {object[]} deals  records { externalId, dealname, amount, contactEmail?, closedate? }
  * @param {object} [options]
  * @param {string} [options.pipelineId]
  * @param {string} [options.stageId]
- * @returns {Promise<object>} summary; deal entries also carry `association`
+ * @returns {Promise<object>} summary with created/updated/unchanged/partial/skipped/failed
  */
 async function syncDealsWithHubSpot(deals, { pipelineId, stageId } = {}) {
   const records = assertRecordArray(deals, 'deals source');
@@ -240,24 +253,46 @@ async function syncDealsWithHubSpot(deals, { pipelineId, stageId } = {}) {
 
   for (const { index, key } of unique) {
     const { properties, contactEmail } = prepared.get(index);
+
+    // 1. Save the deal. A failure here means the deal itself was not saved.
+    let outcome;
     try {
-      const outcome = await upsertDeal(key, properties);
-      const entry = { index, key, id: outcome.id, ...(outcome.changedProperties ? { changedProperties: outcome.changedProperties } : {}) };
-      if (contactEmail) entry.association = await associateDealWithContact(outcome.id, contactEmail);
-      summary[outcome.status].push(entry);
+      outcome = await upsertDeal(key, properties);
     } catch (error) {
       summary.failed.push({ index, key, ...failureOf(error) });
-      if (ABORT_CODES.has(error.code)) {
+      if (isAbortError(error)) {
         summary.aborted = error.code;
         logger.warn(`syncDealsWithHubSpot aborted after record ${index}: ${error.code}`);
         break;
       }
+      continue;
+    }
+
+    // 2. Associate. The deal is already saved: a failure here is a partial failure,
+    //    reported with the deal id and never as "deal not created".
+    let association;
+    let abortCode = null;
+    if (contactEmail) {
+      try {
+        association = await associateDealWithContact(outcome.id, contactEmail);
+      } catch (error) {
+        association = { contactEmail, status: 'failed', ...failureOf(error) };
+        abortCode = error.code;
+      }
+    }
+    applyDealResult(summary, { index, key, id: outcome.id, changedProperties: outcome.changedProperties, association }, outcome.status);
+
+    if (abortCode) {
+      summary.aborted = abortCode;
+      logger.warn(`syncDealsWithHubSpot aborted after record ${index}: ${abortCode} (deal ${outcome.id} was saved; its association was not)`);
+      break;
     }
   }
   return summary;
 }
 
 const DEAL_SYNC_PROPERTIES = ['dealname', 'amount', 'closedate', 'external_id', 'pipeline', 'dealstage'];
+const DEAL_DATE_PROPERTIES = ['closedate'];
 
 /** Lookup by external_id → create / update / unchanged. external_id is never sent on update. */
 async function upsertDeal(externalId, properties) {
@@ -287,7 +322,7 @@ async function upsertDeal(externalId, properties) {
   const { dealname, amount, closedate } = properties;
   const desired = { dealname, amount };
   if (closedate !== undefined) desired.closedate = closedate;
-  const changed = computeChangedProperties(desired, remote.properties);
+  const changed = computeChangedProperties(desired, remote.properties, { dateProperties: DEAL_DATE_PROPERTIES });
   if (Object.keys(changed).length === 0) return { status: 'unchanged', id: remote.id };
   try {
     await dealRepository.update(remote.id, changed);
@@ -297,20 +332,26 @@ async function upsertDeal(externalId, properties) {
   }
 }
 
-/** Resolves the contact by e-mail and associates it (idempotent). Never throws: reports status. */
+/**
+ * Resolves the contact by e-mail and associates it (idempotent).
+ * Returns { status: 'created' | 'already' | 'skipped' | 'failed', ... }.
+ * Throws only for authentication / scope errors (401/403), so the caller aborts the run.
+ */
 async function associateDealWithContact(dealId, contactEmail) {
   let contact;
   try {
     contact = await contactRepository.getByEmail(contactEmail, { properties: ['email'] });
   } catch (error) {
     if (isNotFound(error)) return { contactEmail, status: 'skipped', reason: 'CONTACT_NOT_FOUND' };
-    handleHubSpotErrors(error, { operation: 'syncDeals.lookupContact' });
-    return { contactEmail, status: 'failed', ...failureOf(error) };
+    const handled = handleHubSpotErrors(error, { operation: 'syncDeals.lookupContact', dealId });
+    if (isAbortError(handled)) throw handled;
+    return { contactEmail, status: 'failed', ...failureOf(handled) };
   }
   try {
     const result = await hubSpotService.associateContactToDeal(contact.id, dealId);
     return { contactEmail, contactId: contact.id, status: result.alreadyAssociated ? 'already' : 'created' };
   } catch (error) {
+    if (isAbortError(error)) throw error;
     return { contactEmail, contactId: contact.id, status: 'failed', ...failureOf(error) };
   }
 }

@@ -26,7 +26,7 @@ const {
   validateSearchFilters,
   PayloadValidationError,
 } = require('../utils/validateHubSpotPayload');
-const { paginateAll, collectPages, getNextCursor, MAX_PAGE_SIZE } = require('../utils/pagination');
+const { paginateAll, collectPages, findAcrossPages, getNextCursor, MAX_PAGE_SIZE } = require('../utils/pagination');
 const {
   CONTACT_NAME_PROPERTIES,
   DEFAULT_CONTACT_PROPERTIES,
@@ -249,23 +249,35 @@ async function getAssociationTypes(fromObjectType, toObjectType) {
   }
 }
 
-/** Deals associated with a contact: GET .../contact/{id}/associations/deal */
+// GET .../{from}/{id}/associations/{to} accepts limit (default and maximum 500) and after.
+const ASSOCIATION_PAGE_SIZE = 500;
+const associationPaging = { limit: ASSOCIATION_PAGE_SIZE, maxPageSize: ASSOCIATION_PAGE_SIZE };
+
+/** Every association entry from one record to an object type, following paging.next.after. */
+function listAllAssociations(fromObjectType, fromObjectId, toObjectType) {
+  return paginateAll(
+    (params) => associationRepository.listAssociations(fromObjectType, fromObjectId, toObjectType, params),
+    associationPaging
+  );
+}
+
+/** Deals associated with a contact: GET .../contact/{id}/associations/deal (all pages). */
 async function getContactDealAssociations(contactId) {
   const id = validateHubSpotId(contactId, 'contactId');
   try {
-    const page = await associationRepository.listAssociations(OBJECT_TYPES.contact, id, OBJECT_TYPES.deal);
-    return (page.results || []).map((entry) => ({ dealId: String(entry.toObjectId), associationTypes: entry.associationTypes || [] }));
+    const results = await listAllAssociations(OBJECT_TYPES.contact, id, OBJECT_TYPES.deal);
+    return results.map((entry) => ({ dealId: String(entry.toObjectId), associationTypes: entry.associationTypes || [] }));
   } catch (error) {
     throw handleHubSpotErrors(error, { operation: 'getContactDealAssociations', contactId: id });
   }
 }
 
-/** Contacts associated with a deal: GET .../deal/{id}/associations/contact (the reverse direction). */
+/** Contacts associated with a deal: GET .../deal/{id}/associations/contact (all pages, reverse direction). */
 async function getDealContactAssociations(dealId) {
   const id = validateHubSpotId(dealId, 'dealId');
   try {
-    const page = await associationRepository.listAssociations(OBJECT_TYPES.deal, id, OBJECT_TYPES.contact);
-    return (page.results || []).map((entry) => ({ contactId: String(entry.toObjectId), associationTypes: entry.associationTypes || [] }));
+    const results = await listAllAssociations(OBJECT_TYPES.deal, id, OBJECT_TYPES.contact);
+    return results.map((entry) => ({ contactId: String(entry.toObjectId), associationTypes: entry.associationTypes || [] }));
   } catch (error) {
     throw handleHubSpotErrors(error, { operation: 'getDealContactAssociations', dealId: id });
   }
@@ -275,8 +287,9 @@ async function getDealContactAssociations(dealId) {
  * Associates a contact with a deal (direction contact -> deal) using the default
  * association endpoint: PUT .../contact/{contactId}/associations/default/deal/{dealId}.
  *
- * Idempotency: existing associations are read first; when the deal is already
- * associated nothing is written and `alreadyAssociated: true` is returned. The PUT
+ * Idempotency: existing associations are read first, page by page (500 per page),
+ * stopping as soon as the deal is found; when it is already associated nothing is
+ * written and `alreadyAssociated: true` / `created: false` is returned. The PUT
  * itself is idempotent as well (HubSpot does not create a second link for the same
  * pair), so a concurrent repeat cannot produce duplicates either.
  *
@@ -292,8 +305,11 @@ async function associateContactToDeal(contactId, dealId) {
   const from = validateHubSpotId(contactId, 'contactId');
   const to = validateHubSpotId(dealId, 'dealId');
   try {
-    const existing = await associationRepository.listAssociations(OBJECT_TYPES.contact, from, OBJECT_TYPES.deal);
-    const found = findAssociation(existing.results, to);
+    const { item: found } = await findAcrossPages(
+      (params) => associationRepository.listAssociations(OBJECT_TYPES.contact, from, OBJECT_TYPES.deal, params),
+      (entry) => findAssociation([entry], to) !== null,
+      associationPaging
+    );
     if (found) {
       return { contactId: from, dealId: to, created: false, alreadyAssociated: true, associationTypes: found.associationTypes || [] };
     }

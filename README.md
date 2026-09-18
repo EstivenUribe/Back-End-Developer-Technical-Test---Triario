@@ -10,9 +10,18 @@
 
 This project was developed as a submission for Triario’s Backend Developer technical assessment. It demonstrates Node.js fundamentals and a modular integration with the HubSpot CRM API, covering contacts, deals, associations, synchronization, validation, and error handling.
 
-Everything in the brief is implemented, unit-tested (102 tests) and verified live against the
-portal on records created by the project (see [section 12](#12-verification-results)). The
-requirements matrix, the decisions and the ambiguities found in the brief are kept in
+Every function and file named in the brief is implemented. Two kinds of verification back it,
+and [section 12](#12-verification-results) keeps them apart:
+
+- **Unit tests** (`npm test`, no network) cover the pure logic: validation, pagination helpers,
+  error normalization, the retry policy (backoff, `Retry-After`, idempotency rules), redaction,
+  and the sync decision and summary logic. HubSpot itself is never mocked.
+- **Real calls** to the HubSpot sandbox provided by Triario exercised the diagnostic, the error
+  evidence script, contacts and deals CRUD, associations and the sync, always on records created
+  by the project. Behaviours that would require provoking failures on the sandbox (429, 5xx,
+  timeouts) are covered by unit tests only and are listed as not verified live.
+
+The requirements matrix, the decisions and the ambiguities found in the brief are kept in
 [docs/design.md](docs/design.md).
 
 ---
@@ -85,6 +94,7 @@ cp .env.example .env        # PowerShell: Copy-Item .env.example .env
 | `HUBSPOT_TIMEOUT_MS` | no | Per-request timeout. Default `10000`. |
 | `HUBSPOT_MAX_RETRIES` | no | Retries for 429 / 5xx / network errors. Default `3`. |
 | `HUBSPOT_RETRY_BASE_DELAY_MS` | no | Base delay of the exponential backoff. Default `1000`. |
+| `HUBSPOT_MAX_RETRY_WAIT_MS` | no | Longest single wait accepted from a `Retry-After` header. Above it the request is not retried and the error reports the wait. Default `120000`. |
 | `LOG_LEVEL` | no | `error`, `warn`, `info` (default) or `debug`. |
 
 Two different URLs are involved:
@@ -130,10 +140,12 @@ Source: [Private apps](https://developers.hubspot.com/docs/guides/apps/private-a
 | API base URL | https://api.hubapi.com |
 | Deal pipeline used for verification | "Tests" (`4664657`), stage "Pruebas" (`4664661`) |
 
-The portal is a populated account, not an empty sandbox. Every example that writes therefore
-works only on records created by this project (reserved `example.*` e-mail addresses, company
-"Triario Technical Test", deal names prefixed `Triario Test - `), the delete examples refuse
-anything else without `--force`, and listing examples cap the number of pages by default.
+The portal is a sandbox provided by Triario for this assessment. It contains pre-existing data
+(contacts, deals, several pipelines and hundreds of custom properties), so it is not an empty
+account. Every example that writes therefore works only on records created by this project
+(reserved `example.*` e-mail addresses, company "Triario Technical Test", deal names prefixed
+`Triario Test - `), the delete examples refuse anything else without `--force`, and listing
+examples cap the number of pages by default.
 
 ## 7. Endpoints and official documentation
 
@@ -235,7 +247,11 @@ npm test
 until it disappears, with an optional page cap. Single-page functions return `nextAfter` so the
 caller continues; the Search API uses a numeric cursor and up to 200 per page. Filters are never
 sent to the list endpoint; with filters `getHubSpotContacts` switches to the Search API (10,000
-results max, 5 requests/second, recent writes may not be indexed yet).
+results max, 5 requests/second, recent writes may not be indexed yet). Association reads
+(`GET .../{from}/{id}/associations/{to}`, `limit` default and maximum 500, `after`) are walked to
+the last page by `getContactDealAssociations` / `getDealContactAssociations`; the pre-check in
+`associateContactToDeal` uses `findAcrossPages`, which stops at the page where the deal is found
+and never reports `created: true` for an association that already existed.
 
 **Validation.** `validateHubSpotPayload(objectType, properties, { partial })` runs before any
 request: create mode requires the key fields (`email`; `dealname`, `pipeline`, `dealstage`),
@@ -259,23 +275,31 @@ verified against the portal (`resolveDealStage`).
 | 5xx | `SERVER_ERROR` | yes, 2 s minimum delay |
 
 **Retries.** Only `hubSpotClient.request` retries, up to `HUBSPOT_MAX_RETRIES`, with
-`base × 2^(attempt−1)` plus up to 20 % jitter, capped at 30 s; a `Retry-After` header replaces the
-formula. Nested `withRetry` calls detect `attempts` and never multiply requests. `POST` requests
-that create data are retried only when the request certainly never reached HubSpot (429, refused
-connection, DNS failure); after a timeout, reset or 5xx the error is thrown with
-`outcomeUncertain: true` so the caller looks the record up instead of creating it blindly.
-Read-only `POST`s (search, token lookup) are marked idempotent. Configuration and validation errors
-keep their own types and are never retried. Errors are logged once (`handleHubSpotErrors`) and
-always propagated; scripts exit with code 1.
+`base × 2^(attempt−1)` plus up to 20 % jitter; that local formula is capped at 30 s. A
+`Retry-After` header replaces the formula and is honoured in full: the 30 s cap never shortens a
+server-provided wait (a 120 s `Retry-After` waits 120 s), whether it arrives in seconds or as an
+HTTP date. If the wait exceeds the operational maximum `HUBSPOT_MAX_RETRY_WAIT_MS` (default 2
+minutes), the request is not retried at all, never earlier than asked: the error is thrown with
+`retryWaitExceeded: true`, the wait in `retryAfterMs` and an explanatory message. Nested
+`withRetry` calls detect `attempts` and never multiply requests. `POST` requests that create data
+are retried only when the request certainly never reached HubSpot (429, refused connection, DNS
+failure); after a timeout, reset or 5xx the error is thrown with `outcomeUncertain: true` so the
+caller looks the record up instead of creating it blindly. Read-only `POST`s (search, token
+lookup) are marked idempotent. Configuration and validation errors keep their own types and are
+never retried. Errors are logged once (`handleHubSpotErrors`) and always propagated; scripts exit
+with code 1.
 
 **What is never logged.** The original request (with the `Authorization` header and body) is not
 attached to errors; the logger redacts credential keys and `Bearer`/`pat-` values and masks e-mail
 addresses, including URL-encoded ones in request paths. Validation messages do not echo e-mails.
 
-**Rate limits.** Free/Starter private apps get 100 requests per 10 s. The sync processes records
-sequentially (≤ 2 requests per contact, ≤ 4 per deal), the client warns when
-`X-HubSpot-RateLimit-Remaining` drops below 10, and 429s are handled by the retry policy. Rate
-limits and 5xx were not provoked on purpose; that logic is covered by unit tests.
+**Rate limits.** Free/Starter private apps get 100 requests per 10 s per app, shared by every
+process using the token. The sync processes records sequentially (≤ 2 requests per contact, ≤ 4
+per deal), which removes concurrency from this process but does not by itself guarantee the
+limit: a large file, a fast portal or other integrations sharing the app can still reach it. The
+actual protection is the retry policy above (429 → wait `Retry-After`, then back off), plus a
+warning when `X-HubSpot-RateLimit-Remaining` drops below 10. Rate limits and 5xx were not
+provoked on the sandbox on purpose; that logic is covered by unit tests only.
 
 ## 10. Sync identity and idempotency
 
@@ -287,12 +311,31 @@ limits and 5xx were not provoked on purpose; that logic is covered by unit tests
   property exists without uniqueness). Lookup:
   `GET /deals/{externalId}?idProperty=external_id`. `external_id` is sent on create only. The deal
   name is never a key.
-- **Decision**: lookup → `404` ⇒ create; found ⇒ compare as trimmed strings ⇒ `PATCH` only the
-  differences or `unchanged`. `409` on create ⇒ update path. Pipeline/stage set on create only.
-- **Per-record errors** do not stop the file; auth/scope errors abort early. Summary:
-  `{ total, created[], updated[], unchanged[], skipped[], failed[], aborted }` with ids.
-- **Associations**: `contactEmail` on a deal is resolved and associated idempotently
-  (`created`, then `already`; `skipped (CONTACT_NOT_FOUND)` if the contact is missing).
+- **Decision**: lookup → `404` ⇒ create; found ⇒ compare the desired properties with the remote
+  ones ⇒ `PATCH` only the differences or `unchanged`. `409` on create ⇒ update path.
+  Pipeline/stage set on create only.
+- **Comparison rules**: text and numeric properties are compared as trimmed strings (HubSpot
+  returns every value as a string). Properties declared as dates (`closedate`) are compared by
+  instant, so `2026-09-18T00:00:00Z` and `2026-09-18T00:00:00.000Z` are the same value; no other
+  string is ever interpreted as a date. `closedate` is validated before the sync (ISO 8601 or
+  epoch milliseconds, normalized to canonical ISO; invalid values are rejected locally); an empty
+  value means "clear the property" and is sent as `""`; if a remote value is unparseable the
+  comparison falls back to text.
+- **Per-record errors** do not stop the file; 401/403 abort early (every remaining record would
+  fail the same way), including a 401/403 raised while associating. Summary:
+  `{ total, created[], updated[], unchanged[], partial[], skipped[], failed[], aborted }` with ids.
+- **Associations and partial failures**: `contactEmail` on a deal is resolved and associated
+  idempotently (`created`, then `already` on later runs). Two non-success outcomes are kept
+  apart on purpose:
+  - `skipped (CONTACT_NOT_FOUND)`: the contact does not exist in HubSpot. This is a source-data
+    condition, not an integration failure, so the deal keeps its own status and the run exits
+    with code 0 after printing a warning; syncing contacts first and re-running deals completes
+    the association.
+  - `failed`: the deal was saved but HubSpot rejected the association (or the contact lookup
+    failed). The entry goes to `partial` with the deal id and `dealStatus`
+    (`created`/`updated`/`unchanged`); it is never counted as a failed deal and never twice, and
+    the script exits with code 1. A later run finds the deal by `external_id` (`unchanged`) and
+    re-attempts only the association, so nothing is duplicated.
 - **No local mapping file**: identity lives in HubSpot; losing the checkout changes nothing.
 
 ## 11. Technical decisions, discrepancies and limitations
@@ -322,8 +365,12 @@ Discrepancies with the brief:
 Limitations:
 
 - Search filters form a single AND group; OR groups, sorting and free-text `query` are not exposed.
-- Batch endpoints are not used; the sync is sequential by design (rate-limit friendly, slower).
-- 429, 5xx and timeouts are handled by tested code paths but were not reproduced live.
+- Batch endpoints are not used; the sync is sequential by design (less concurrency, slower; it
+  does not by itself guarantee the rate limit, see section 9).
+- 429, 5xx, timeouts and `Retry-After` handling are covered by unit tests but were not
+  reproduced on the sandbox.
+- A run that stops because `Retry-After` exceeds `HUBSPOT_MAX_RETRY_WAIT_MS` has to be re-run
+  later by the operator; the sync is idempotent so re-running is safe.
 - Labeled associations are implemented in the repository but only the default (unlabeled) one is
   used.
 - The `external_id` property created by the sync stays in the portal; remove it with
@@ -333,12 +380,31 @@ Limitations:
 
 ## 12. Verification results
 
-All runs below were executed on 2026-09-18 against Hub ID `51411630`, on records created by the
-project and archived afterwards. Ids are real record ids from those runs.
+Two kinds of evidence are listed separately. Nothing below is simulated: unit tests run with
+no network and never stand in for HubSpot; real calls were made to the Triario sandbox
+(Hub ID `51411630`) on records created by the project and archived afterwards. Ids are the
+record ids observed in those runs.
+
+### 12.1 Verified by unit tests only (`npm test`, no network)
+
+| Behaviour | Where |
+|-----------|-------|
+| Retry policy: exponential backoff with jitter, 4xx never retried, 429/5xx/network retried up to `HUBSPOT_MAX_RETRIES`, 2 s minimum for 5xx | `test/handleHubSpotErrors.test.js` |
+| `Retry-After` honoured in full (120 s in seconds, ~90 s as an HTTP date, never capped at 30 s); stop without retrying when it exceeds `HUBSPOT_MAX_RETRY_WAIT_MS` | `test/handleHubSpotErrors.test.js` |
+| Non-idempotent `POST` not retried after uncertain outcomes; nested `withRetry` never multiplies requests; errors logged once; token, headers and body never serialized | `test/handleHubSpotErrors.test.js`, `test/hubSpotClient.test.js` |
+| Pagination helpers, including an item found on a later page with early stop and the 500-per-page association limit | `test/pagination.test.js` |
+| Payload validation (create vs partial, ids, search filters, `closedate` normalization and rejection) | `test/validateHubSpotPayload.test.js` |
+| Sync decisions: key partition, date-aware comparison (equivalent, different, invalid, empty/clear), partial-failure bucket, exit-code rule, 401/403 abort classification | `test/syncHelpers.test.js` |
+| Fundamentals (callback, promise, CommonJS, stream success and failure) and delete safety guards | `test/fundamentals.test.js`, `test/testRecords.test.js` |
+
+Last run: 124 tests, 36 suites, 0 failures (`npm test`), and `npm run fundamentals` completes
+with the expected handled errors.
+
+### 12.2 Verified with real calls to the sandbox
 
 | Check | Command | Observed |
 |-------|---------|----------|
-| Unit tests | `npm test` | 102 tests, 33 suites, 0 failures |
+| Unit tests | `npm test` | 124 tests, 36 suites, 0 failures |
 | Fundamentals | `npm run fundamentals` | four scripts: success path plus a handled error each (ENOENT, non-numeric element, mid-stream failure) |
 | Diagnostic | `npm run diagnose` | token accepted, Hub ID matches `HUBSPOT_PORTAL_ID`, 8 scopes granted (all 7 required), 9 deal pipelines, 877 contact / 540 deal properties, `external_id` present and unique |
 | Real errors | `npm run example:errors` | local `PayloadValidationError`; real 404 by id; real 404 by e-mail with the address masked in the log; real 400 "You can only request at most 100 objects in one request" |
@@ -351,10 +417,15 @@ project and archived afterwards. Ids are real record ids from those runs.
 | No duplicates | Search API counts | 3 deals with `external_id`, 2 contacts at "Example Co" after three runs |
 | Per-record errors | `sync-contacts --file` with bad records | missing e-mail → failed, invalid e-mail → failed, duplicate → skipped, valid ones processed, exit code 1 |
 | Secrets | grep of the token value over files and `git log -p` | 0 occurrences outside `.env`; `.env` untracked |
+| Re-verification after the review fixes: associations paginated | `npm run example:flow` | contact `249225457217` and deal `65079166008`: association created (type `4`), repeat → `alreadyAssociated`, both directions read through the paginated readers (`4` / `3`), amount patched, both archived |
+| Re-verification after the review fixes: date comparison | `sync-contacts` + `sync-deals` twice with `closedate` on `SRC-DEAL-0003` | run 1 created deals `65092864576`, `65104537903`, `65088705905` with 3 associations; the sync sent `2026-12-31T00:00:00.000Z` and HubSpot returns `2026-12-31T00:00:00Z`; run 2 → 3 `unchanged` (text comparison would have reported an update on every run); all six records archived by `sync-cleanup` |
 
-Pending / not verified live: 429 and 5xx responses, timeouts and `Retry-After` handling (unit
-tests only); labeled associations; pagination with more than 100 records per page (demonstrated
-with small page sizes instead).
+Pending / not verified with real calls: 429 and 5xx responses, timeouts, `Retry-After` waits and
+the `HUBSPOT_MAX_RETRY_WAIT_MS` stop (unit tests only); a real partial failure of an association
+(the deal saved and the association rejected by HubSpot) and the 401/403 abort while associating
+(unit tests of the summary logic only, since provoking them would require breaking the sandbox
+token or scopes mid-run); labeled associations; an association list longer than one page of 500;
+pagination with more than 100 records per page (demonstrated with small page sizes instead).
 
 ## 13. Submission contents
 

@@ -65,6 +65,7 @@ function createHubSpotClient({ config } = {}) {
       {
         maxRetries: settings.maxRetries,
         baseDelayMs: settings.retryBaseDelayMs,
+        maxWaitMs: settings.maxRetryWaitMs,
         idempotent: isIdempotent,
         onRetry: (error, attempt, delayMs) =>
           logger.warn(`Retrying ${method} ${safeUrl} (attempt ${attempt}/${settings.maxRetries}) in ${delayMs} ms`, {

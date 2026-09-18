@@ -15,6 +15,7 @@
     "externalId": "SRC-DEAL-0003",
     "dealname": "Triario Test - Annual support - Sample Ltd",
     "amount": 9800,
+    "closedate": "2026-12-31T00:00:00Z",
     "contactEmail": "ana.torres@example.org"
   }
 ]

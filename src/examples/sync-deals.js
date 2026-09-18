@@ -14,7 +14,7 @@
 
 const path = require('path');
 const { syncDealsWithHubSpot } = require('../services/syncService');
-const { loadJsonArray } = require('../utils/syncHelpers');
+const { loadJsonArray, hasSyncFailures } = require('../utils/syncHelpers');
 const { runExample, parseCliArgs, line } = require('./hubSpotApiHandler');
 const { printSyncSummary } = require('./syncOutput');
 
@@ -33,7 +33,7 @@ runExample(
     line('info', `external_id property: ${summary.externalIdProperty.created ? 'created now' : 'already present'} (unique)`);
     line('info', `pipeline "${summary.pipeline.label}" (${summary.pipeline.id}), stage "${summary.stage.label}" (${summary.stage.id})`);
     const counts = printSyncSummary(summary);
-    if (counts.failed > 0 || counts.aborted) process.exitCode = 1;
+    if (hasSyncFailures(counts)) process.exitCode = 1; // failed records, partial (association) failures or abort
     return undefined;
   },
   { printResult: false }
