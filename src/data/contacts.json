@@ -1,0 +1,22 @@
+[
+  {
+    "email": "Laura.Gomez@example.com",
+    "firstname": "Laura",
+    "lastname": "Gómez",
+    "phone": "+57 300 111 2233",
+    "company": "Example Co"
+  },
+  {
+    "email": "carlos.ruiz@example.com",
+    "firstname": "Carlos",
+    "lastname": "Ruiz",
+    "phone": "+57 300 444 5566",
+    "company": "Example Co"
+  },
+  {
+    "email": "ana.torres@example.org",
+    "firstname": "Ana",
+    "lastname": "Torres",
+    "company": "Sample Ltd"
+  }
+]

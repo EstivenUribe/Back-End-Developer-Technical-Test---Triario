@@ -1,0 +1,37 @@
+{
+  "name": "hubspot-crm-integration",
+  "version": "1.0.0",
+  "description": "Node.js / HubSpot CRM integration - Triario back-end technical test",
+  "main": "src/services/hubSpotService.js",
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.js\"",
+    "diagnose": "node src/examples/diagnose.js",
+    "example:errors": "node src/examples/error-handling.js",
+    "example:get-contact-names": "node src/examples/get-contact-names.js",
+    "example:get-contacts": "node src/examples/get-contacts.js",
+    "example:create-contact": "node src/examples/create-contact.js",
+    "example:update-contact": "node src/examples/update-contact.js",
+    "example:delete-contact": "node src/examples/delete-contact.js",
+    "example:list-pipelines": "node src/examples/list-pipelines.js",
+    "example:get-deals": "node src/examples/get-deals.js",
+    "example:create-deal": "node src/examples/create-deal.js",
+    "example:update-deal": "node src/examples/update-deal.js",
+    "example:delete-deal": "node src/examples/delete-deal.js",
+    "example:associate": "node src/examples/associate-contact-deal.js",
+    "example:flow": "node src/examples/contact-deal-flow.js",
+    "fundamentals": "node src/fundamentals/callbacks.js && node src/fundamentals/asyncAwait.js && node src/fundamentals/main.js && node src/utils/streams.js",
+    "fundamentals:callbacks": "node src/fundamentals/callbacks.js",
+    "fundamentals:async-await": "node src/fundamentals/asyncAwait.js",
+    "fundamentals:modules": "node src/fundamentals/main.js",
+    "fundamentals:streams": "node src/utils/streams.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7"
+  }
+}

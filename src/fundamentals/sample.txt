@@ -1,0 +1,3 @@
+Node.js runs JavaScript outside the browser.
+The event loop lets a single thread handle many I/O operations.
+Callbacks came first, then Promises, then async/await.

@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+
+# Environment files with real credentials (only .env.example is versioned)
+.env
+.env.*
+!.env.example
+
+# Logs and OS noise
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+
+# Editor folders
+.vscode/
+.idea/
